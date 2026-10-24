@@ -19,9 +19,13 @@ MAILBOX_TTL_SECS = int(os.environ.get('KW_MAILBOX_TTL_SECS', str(24 * 3600)))
 MAILBOX_MAX = int(os.environ.get('KW_MAILBOX_MAX', '500'))
 # Certwire app-layer delivery (2026-10-23): registrations that carry a
 # certwire address get knocks for these services delivered as app-layer
-# posts via the kw-bridge companion (the ack is the delivery signal);
-# everything else — and any certwire failure — falls back to the bound
-# tunnel port. The mailbox flush uses the same deliver() path.
+# posts via the kw-bridge companion (the ack is the delivery signal).
+# A failed certwire attempt does NOT fall back to the tunnel port
+# (stripped 2026-10-24, Chris's direction: certwire is the transport
+# for certwire-bearing registrations; failures spool to the mailbox
+# and the flusher retries there). The tunnel port remains only as the
+# primary delivery for registrations without a certwire address.
+# The mailbox flush uses the same deliver() path.
 BRIDGE_URL = os.environ.get('KW_BRIDGE_URL', 'http://127.0.0.1:18770')
 CW_SERVICES = {s.strip() for s in os.environ.get(
     'KW_CERTWIRE_SERVICES', 'gmail,gmailwork,test').split(',') if s.strip()}
@@ -204,17 +208,20 @@ def bridge_deliver(addr, guid_hex, method, rest):
 
 def deliver(reg, guid_hex, method, rest):
     """Deliver one knock for a registration: certwire app-layer for
-    opted-in services on registrations carrying a certwire address,
-    the bound tunnel port otherwise (and as fallback). Mailbox
-    entries spooled before guid_hex was recorded pass None and stay
-    port-only."""
+    opted-in services on registrations carrying a certwire address
+    (certwire or nothing — a failed attempt returns False and the
+    knock spools to the mailbox; there is no port fallback). The
+    bound tunnel port serves registrations without a certwire
+    address, as their primary transport. Mailbox entries spooled
+    before guid_hex was recorded pass None and stay port-only."""
     service = rest.strip('/').split('/')[0].lower() if rest.strip('/') else ''
     addr = reg.get('certwire')
     if addr and guid_hex and service in CW_SERVICES:
         if bridge_deliver(addr, guid_hex, method, rest):
             _dlog(f'certwire ok {method} {rest} -> {addr}')
             return True
-        _dlog(f'certwire failed {method} {rest} -> {addr}; trying port')
+        _dlog(f'certwire failed {method} {rest} -> {addr}; no port fallback')
+        return False
     ok = try_deliver(reg['port'], method, rest)
     _dlog(f"port {'ok' if ok else 'failed'} {method} {rest} -> {reg['port']}")
     return ok
